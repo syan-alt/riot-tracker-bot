@@ -22,7 +22,10 @@ This a repo for a discord bot that reports newly completed matches of video game
 - Never make a PR unless the developer explicitly asks you to do so
 - Never open PRs as drafts
 - Conventional commit titles, plain language: `fix(web): new threads no longer spike CPU`
-- Body: the problem in a sentence or two, then how you fixed it. End with the model and harness that did the work
+- Body: the problem in a sentence or two, then how you fixed it. End with the specific model (not a generic model family name) and harness that did the work. For example:
+
+      Model: GPT 5.6-Sol
+      Harness: Codex Desktop
 
 ## Project Structure
 
