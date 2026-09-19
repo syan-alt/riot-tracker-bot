@@ -7,6 +7,8 @@ description: Headless end-to-end verification for the riot-tracker Discord bot. 
 
 Cloud agents prove bot behavior by running the live app plus the admin CLI against an isolated sqlite file. No Discord web login is required.
 
+**Discord destination is isolated too.** Run the bot locally in the cloud VM (`pnpm start` / this harness). Connect it only to the explicitly configured testing guild and channel. Never post match reports, mock reports, or verify output to a production destination. Isolated sqlite does not make an ambient `NOTIFICATION_CHANNEL_ID` safe.
+
 ## Launch
 
 ```bash
@@ -15,13 +17,17 @@ export PATH="$NVM_BIN:$PATH"
 pnpm verify
 ```
 
-`pnpm verify` typechecks, starts the bot (`pnpm start`, not `pnpm dev`), waits until the process is up, drives admin commands, writes JSON evidence to `/opt/cursor/artifacts/verify-<run-id>/`, and leaves the bot running.
+`pnpm verify` typechecks, starts the bot (`pnpm start`, not `pnpm dev`) only when a testing Discord destination is set, waits until the process is up, drives admin commands, writes JSON evidence to `/opt/cursor/artifacts/verify-<run-id>/`, and leaves the bot running.
 
-Isolation uses `DB_PATH=/tmp/riot-verify-<run-id>.sqlite` so production data is never touched.
+Isolation:
 
-Do not set `VERIFY_RIOT_ID` when a Railway token is available. The harness resolves a production Riot ID itself.
+- sqlite: `DB_PATH=/tmp/riot-verify-<run-id>.sqlite` so production data is never touched.
+- Discord: ambient `NOTIFICATION_CHANNEL_ID` is ignored. Configure `TESTING_DISCORD_GUILD_ID` plus `TESTING_NOTIFICATION_CHANNEL_ID`, or `DISCORD_TEST_CHANNEL_URL`. `VERIFY_NOTIFICATION_CHANNEL_ID` may select only the configured testing channel. Missing or conflicting values skip Discord send. `report-mock` and `DEV_MODE` fail closed outside that destination.
+- Riot: set `VERIFY_RIOT_ID` to the designated non-production test account.
+- credentials: use only a testing bot token. Do not expose a production Discord token, a production Railway token, or a production database to the cloud environment.
+- Railway: `RAILWAY_API_TOKEN_DEV` is allowed. It is a `dev`-environment-scoped Railway project token used read-only. Export it as `RAILWAY_TOKEN` only while running Railway CLI, and keep `RAILWAY_API_TOKEN` unset. Production Railway tokens, environments, databases, deploys, and mutations remain forbidden.
 
-Cloud-agent traps (Railway project tokens, ssh keys, READY race, Henrik 404) are in [references/cloud-agent-lessons.md](references/cloud-agent-lessons.md).
+Cloud-agent traps (READY race, Henrik 404, Discord isolation) are in [references/cloud-agent-lessons.md](references/cloud-agent-lessons.md).
 
 ## Doctor
 
@@ -36,59 +42,21 @@ For the live bot, confirm the process log contains `slash commands registered` a
 
 ## Riot ID resolution
 
-Verification needs a real Riot account. Resolution order:
-
-1. `VERIFY_RIOT_ID=name#tag` — explicit override. Skip this when proving Railway lookup.
-2. `PRODUCTION_DB_PATH=/path/to/riot-tracker.sqlite` — read accounts via `pnpm admin status --json`
-3. Railway token (`RAILWAY_API_TOKEN`, `RAILWAY_API_KEY`, or `RAILWAY_TOKEN`) — `railway ssh --service riot-tracker-bot -- pnpm admin status --json`
-
-Pick the first account with tracked games when reading production status.
-
-### Railway tokens and ssh
-
-Cursor Cloud often injects a **project/workspace** token as `RAILWAY_API_TOKEN` (a UUID). That token:
-
-- Fails `railway whoami`, `railway list`, and `railway link` with `Unauthorized` (`me` is not allowed).
-- Still answers GraphQL `projects` and can `railway ssh` once a project/service/environment are named.
-
-Do not treat a whoami failure as "Railway is unusable." Discover IDs, then ssh:
-
-```bash
-pnpm exec railway api 'query { projects { edges { node { id name } } } }'
-pnpm exec railway api 'query { project(id: "<project-id>") { name services { edges { node { id name } } } environments { edges { node { id name } } } } }'
-```
-
-Export what ssh needs (names or ids work for `--service` / `--environment`):
-
-```bash
-export RAILWAY_PROJECT_ID=<project-id>
-export RAILWAY_SERVICE=riot-tracker-bot
-export RAILWAY_ENVIRONMENT=production   # or the environment id
-```
-
-`pnpm verify` already forwards those into `railway ssh --project --service --environment`.
-
-SSH also needs a key registered with Railway and `ssh.railway.com` in `known_hosts`:
-
-```bash
-ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
-pnpm exec railway ssh keys add -k ~/.ssh/id_ed25519.pub -n cursor-cloud-verify
-ssh-keyscan -t ed25519 ssh.railway.com >> ~/.ssh/known_hosts
-pnpm exec railway ssh --service riot-tracker-bot -- pnpm admin status --json
-```
-
-Banners from ssh go to stderr. JSON for `admin status` is on stdout; the harness slices from the first `{`.
+Verification needs a real Riot account supplied as `VERIFY_RIOT_ID=name#tag`. Keep it separate from production tracking data. If Cursor secrets omit that account or the testing Discord destination, load them read-only from the Railway `dev` environment with `RAILWAY_API_TOKEN_DEV` (exported as `RAILWAY_TOKEN` for CLI only; `RAILWAY_API_TOKEN` stays unset). Never fall back to production Railway or a production database.
 
 ## Drive
 
 Read `.cursor/skills/verify-riot-tracker-bot/features/README.md` before running individual recipes.
 
-The bundled verifier exercises: typecheck → bot boot → signup → refresh (twice, idempotent) → status → report-mock → signout.
+The bundled verifier exercises: typecheck → inspect mock payload → refuse a non-testing destination → bot boot (testing dest only) → signup → refresh (twice, idempotent) → status → report-mock (testing dest only) → signout.
 
-Manual equivalents:
+Manual equivalents. Point all Discord variables at the dedicated testing destination:
 
 ```bash
 export DB_PATH=/tmp/riot-verify-manual.sqlite
+export TESTING_DISCORD_GUILD_ID=<testing-guild-id>
+export TESTING_NOTIFICATION_CHANNEL_ID=<testing-channel-id>
+export NOTIFICATION_CHANNEL_ID="$TESTING_NOTIFICATION_CHANNEL_ID"
 pnpm start   # separate terminal
 pnpm admin signup <riot-id> --discord-id verify-agent-user --json
 pnpm admin refresh verify-agent-user --json
@@ -103,7 +71,7 @@ Capture under `/opt/cursor/artifacts/verify-<run-id>/`:
 - `results.json` — every step with stdout/stderr
 - `bot.log` — boot excerpt showing the process is up
 
-Proof standards: exercise real Riot/Henrik APIs, real sqlite writes, real Discord REST for `report-mock`. Do not log into Discord web.
+Proof standards: exercise real Riot/Henrik APIs, real sqlite writes, and real Discord REST for `report-mock` only when the destination is the configured testing server. Do not log into Discord web. Do not post verification output to production.
 
 A Henrik 404 on Valorant during signup/refresh is not a harness failure. That game stays in `missing`; League can still track. Second refresh must have `added: []`.
 

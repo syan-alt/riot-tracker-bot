@@ -27,7 +27,7 @@ const rankIconKey = (rank: string) => {
 };
 
 const valorantTierSet = "03621f52-342b-cf4e-4f86-9350a49c6d04";
-const rankIcons = [
+export const valRankIcons = [
   ["iron", 3],
   ["bronze", 6],
   ["silver", 9],
@@ -61,6 +61,7 @@ export const valMatchToDetails = (match: ValRawMatch): MatchDetails => {
       riotName: player.name,
       riotTag: player.tag,
       character: player.agent.name,
+      portraitUrl: `https://media.valorant-api.com/agents/${player.agent.id}/displayicon.png`,
       kills: player.stats.kills,
       deaths: player.stats.deaths,
       assists: player.stats.assists,
@@ -102,7 +103,7 @@ export const makeValorantGameAdapter = Effect.gen(function* () {
 
   const adapter: GameAdapter = {
     game: "valorant",
-    rankIcons,
+    rankIcons: valRankIcons,
     resolveAccount: Effect.fn("GameAdapter.valorant.resolveAccount")(function* (
       name: string,
       tag: string,

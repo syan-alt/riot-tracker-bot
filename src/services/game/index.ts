@@ -27,6 +27,9 @@ export interface MatchPlayer {
   readonly rankIconKey?: string;
   readonly rankDivision?: string;
   readonly flair?: string;
+  // HTTPS image file (.png/.jpg) for a Components V2 thumbnail. Not used in a
+  // Media Gallery: Discord paints those as a blurhash block.
+  readonly portraitUrl?: string;
 }
 
 export interface MatchTeam {

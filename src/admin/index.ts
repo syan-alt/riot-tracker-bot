@@ -15,10 +15,28 @@ import {
   Schema,
 } from "effect";
 import { Argument, Command, Flag, Prompt } from "effect/unstable/cli";
-import { DiscordConfig, DiscordREST, DiscordRESTLive, MemoryRateLimitStoreLive } from "dfx";
-import { registerAccount, refreshAccount, formatRefreshResult } from "../services/discord/commands.ts";
+import {
+  DiscordConfig,
+  DiscordREST,
+  DiscordRESTLive,
+  MemoryRateLimitStoreLive,
+} from "dfx";
+import {
+  registerAccount,
+  refreshAccount,
+  formatRefreshResult,
+} from "../services/discord/commands.ts";
 import { buildMockMatchReport } from "../services/discord/dev-commands.ts";
-import { matchEmbed } from "../services/discord/embed.ts";
+import {
+  matchesDiscordDestination,
+  testingDiscordRefusal,
+} from "../services/discord/destination.ts";
+import {
+  matchReportMessage,
+  rankImagesFrom,
+} from "../services/discord/embed.ts";
+import { lolRankIcons } from "../services/game/game-adapters/lol.ts";
+import { valRankIcons } from "../services/game/game-adapters/valorant.ts";
 import {
   Database,
   DatabaseLive,
@@ -143,9 +161,7 @@ const DiscordRestLive = DiscordRESTLive.pipe(
 );
 
 const withGameAdapters = <A, E>(
-  run: (
-    adapters: GameAdapters["Service"],
-  ) => Effect.Effect<A, E | AdminError>,
+  run: (adapters: GameAdapters["Service"]) => Effect.Effect<A, E | AdminError>,
 ) =>
   Effect.gen(function* () {
     const adapters = yield* GameAdapters;
@@ -577,30 +593,62 @@ const reportMock = Command.make(
   Effect.fn(function* ({ game }) {
     const { json } = yield* admin;
     const channelId = yield* Config.nonEmptyString("NOTIFICATION_CHANNEL_ID");
+    const testingDestination = {
+      channelId: yield* Config.nonEmptyString(
+        "TESTING_NOTIFICATION_CHANNEL_ID",
+      ),
+      guildId: yield* Config.nonEmptyString("TESTING_DISCORD_GUILD_ID"),
+    };
+    if (channelId !== testingDestination.channelId) {
+      return yield* fail(testingDiscordRefusal(channelId));
+    }
     const report = yield* buildMockMatchReport(game).pipe(
       orFail("Could not build mock match report"),
     );
 
-    yield* withDiscordRest((rest) =>
-      rest
-        .createMessage(channelId, {
-          embeds: [matchEmbed(report, {})],
-        })
-        .pipe(orFail("Could not post mock match report")),
+    const message = yield* withDiscordRest((rest) =>
+      Effect.gen(function* () {
+        const channel = yield* rest
+          .getChannel(channelId)
+          .pipe(orFail("Could not read the notification channel"));
+        const guildId = "guild_id" in channel ? channel.guild_id : undefined;
+        if (
+          !matchesDiscordDestination(channelId, guildId, testingDestination)
+        ) {
+          return yield* fail(testingDiscordRefusal(channelId));
+        }
+        return yield* rest
+          .createMessage(
+            channelId,
+            matchReportMessage(
+              report,
+              {},
+              rankImagesFrom([
+                { game: "lol", rankIcons: lolRankIcons },
+                { game: "valorant", rankIcons: valRankIcons },
+              ]),
+            ),
+          )
+          .pipe(orFail("Could not post mock match report"));
+      }),
     );
 
     yield* emit(
       json,
-      { game, channelId, matchId: report.match.matchId },
+      {
+        game,
+        channelId,
+        matchId: report.match.matchId,
+        flags: message.flags,
+        components: message.components.length,
+      },
       [
         `Posted a mock ${gameNames[game]} match report to channel ${channelId}.`,
       ],
     );
   }),
 ).pipe(
-  Command.withDescription(
-    "Post a mock match report embed to the notification channel",
-  ),
+  Command.withDescription("Post a mock match report to riot-tracker-testing"),
 );
 
 const cli = admin.pipe(

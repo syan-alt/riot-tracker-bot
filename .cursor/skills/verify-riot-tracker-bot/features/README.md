@@ -5,9 +5,10 @@ Headless verification for cloud agents. Read this index, then the feature file f
 ## Baseline preconditions
 
 - Node 24 (`nvm use 24`; prepend `$NVM_BIN` to `PATH` on cloud VMs).
-- Ambient secrets: `DISCORD_BOT_TOKEN`, `NOTIFICATION_CHANNEL_ID`, `RIOT_API_KEY`, `HENRIK_API_KEY`.
-- A real Riot ID via Railway (`RAILWAY_API_TOKEN` plus project/service/environment), `PRODUCTION_DB_PATH`, or `VERIFY_RIOT_ID` as a last resort. See the skill Launch section.
-- Isolated database: `DB_PATH=/tmp/riot-verify-$RUN_ID.sqlite`.
+- Ambient secrets: `DISCORD_BOT_TOKEN`, `RIOT_API_KEY`, `HENRIK_API_KEY`.
+- Discord destination for verify / mock reports: configure `TESTING_DISCORD_GUILD_ID` plus `TESTING_NOTIFICATION_CHANNEL_ID`, or `DISCORD_TEST_CHANNEL_URL`. `VERIFY_NOTIFICATION_CHANNEL_ID` may select only the configured testing channel. If the values are missing or conflict, skip Discord send.
+- A real non-production test Riot account in `VERIFY_RIOT_ID`.
+- Isolated database: `DB_PATH=/tmp/riot-verify-$RUN_ID.sqlite`. Isolated sqlite is not enough; Discord must be isolated too.
 - `pnpm start` with ambient env. Do not use `pnpm dev` (it wants a `.env` file).
 
 ## Driving conventions
@@ -15,18 +16,18 @@ Headless verification for cloud agents. Read this index, then the feature file f
 - Prefer `pnpm verify` for full coverage.
 - Use `pnpm admin … --json` for individual steps; never prompt in scripts.
 - Do not log into Discord web or Gmail for verification.
-- Do not set `VERIFY_RIOT_ID` when proving production resolution through Railway.
+- Do not post verify or mock reports to production. Local bot, configured testing destination only.
+- `RAILWAY_API_TOKEN_DEV` is allowed as a read-only Railway `dev` project token. Export it as `RAILWAY_TOKEN` only for Railway CLI and keep `RAILWAY_API_TOKEN` unset. Production Railway tokens, environments, databases, deploys, and mutations are forbidden.
 
 ## Proof and skip reporting
 
 - JSON stdout from admin commands is the primary proof.
 - `results.json` from `pnpm verify` records every step.
-- Report unreachable features with the missing prerequisite (e.g. Railway token cannot `ssh` even after project ids and an SSH key).
-- `railway whoami` Unauthorized is not a skip by itself. Try GraphQL `projects` and `railway ssh` with `--project` / `--service` / `--environment`.
+- Report unreachable features with the missing testing prerequisite.
 
 ## Features
 
 - [Bot boot](./bot-boot.md)
 - [Signup](./signup.md)
 - [Refresh](./refresh.md)
-- [Report mock embed](./report-mock.md)
+- [Report mock](./report-mock.md)
