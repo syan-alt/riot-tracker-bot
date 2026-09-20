@@ -2,6 +2,19 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Effect } from "effect";
+import { buildMockMatchReport } from "../services/discord/dev-commands.ts";
+import {
+  type DiscordDestination,
+  testingDiscordRefusal,
+  testingDiscordDestination,
+} from "../services/discord/destination.ts";
+import {
+  matchReportMessage,
+  gameLogosFrom,
+} from "../services/discord/embed.ts";
+import { lolLogoUrl } from "../services/game/game-adapters/lol.ts";
+import { valLogoUrl } from "../services/game/game-adapters/valorant.ts";
 import { resolveVerifyRiotId } from "./production-riot-id.ts";
 
 const workspace = join(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -38,12 +51,23 @@ const tmux = (args: ReadonlyArray<string>) =>
     encoding: "utf-8",
   });
 
-const sharedEnv = () => ({
-  ...process.env,
-  DB_PATH: dbPath,
-  DEV_MODE: "true",
-  LOG_LEVEL: "Warn",
-});
+const testingDestination = testingDiscordDestination(process.env);
+const testingChannelId = testingDestination?.channelId;
+
+const sharedEnv = () => {
+  const env: Record<string, string | undefined> = { ...process.env };
+  env.DB_PATH = dbPath;
+  env.DEV_MODE = "true";
+  env.LOG_LEVEL = "Warn";
+  // Never inherit an ambient destination. Only the testing allowlist is valid.
+  delete env.NOTIFICATION_CHANNEL_ID;
+  if (testingDestination) {
+    env.NOTIFICATION_CHANNEL_ID = testingDestination.channelId;
+    env.TESTING_NOTIFICATION_CHANNEL_ID = testingDestination.channelId;
+    env.TESTING_DISCORD_GUILD_ID = testingDestination.guildId;
+  }
+  return env;
+};
 
 const run = (args: ReadonlyArray<string>, env = sharedEnv()) => {
   const result = spawnSync("pnpm", args, {
@@ -87,13 +111,28 @@ const stopBotSessions = () => {
 
 const startBot = () => {
   stopBotSessions();
-  tmux(["new-session", "-d", "-s", botSession, "-c", workspace, "--", "bash", "-l"]);
+  tmux([
+    "new-session",
+    "-d",
+    "-s",
+    botSession,
+    "-c",
+    workspace,
+    "--",
+    "bash",
+    "-l",
+  ]);
+  const discordDest = testingDestination
+    ? `export NOTIFICATION_CHANNEL_ID="${testingDestination.channelId}" TESTING_NOTIFICATION_CHANNEL_ID="${testingDestination.channelId}" TESTING_DISCORD_GUILD_ID="${testingDestination.guildId}"`
+    : "unset NOTIFICATION_CHANNEL_ID";
   const command = [
     'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"',
     '. "$NVM_DIR/nvm.sh"',
     "nvm use 24",
     'export PATH="$NVM_BIN:$PATH"',
     `export DB_PATH="${dbPath}" DEV_MODE=true LOG_LEVEL=Info`,
+    "unset NOTIFICATION_CHANNEL_ID",
+    discordDest,
     `cd "${workspace}"`,
     "pnpm start",
   ].join(" && ");
@@ -133,7 +172,17 @@ const writeArtifacts = (riotId: string) => {
   mkdirSync(artifactDir, { recursive: true });
   writeFileSync(
     join(artifactDir, "results.json"),
-    JSON.stringify({ runId, dbPath, riotId, results }, null, 2),
+    JSON.stringify(
+      {
+        runId,
+        dbPath,
+        riotId,
+        testingChannelId: testingChannelId ?? null,
+        results,
+      },
+      null,
+      2,
+    ),
   );
   const botLog = results.find((entry) => entry.step === "bot log tail");
   if (botLog?.stdout) {
@@ -147,25 +196,164 @@ const fail = (message: string, riotId = "unknown"): never => {
   process.exit(1);
 };
 
+const mediaUrlsFrom = (node: unknown): Array<string> => {
+  if (Array.isArray(node)) return node.flatMap(mediaUrlsFrom);
+  if (!node || typeof node !== "object") return [];
+  const record = node as Record<string, unknown>;
+  const nested = [
+    record.components,
+    record.items,
+    record.accessory,
+    record.media,
+  ].flatMap(mediaUrlsFrom);
+  return typeof record.url === "string" ? [record.url, ...nested] : nested;
+};
+
+const hasComponentType = (node: unknown, type: number): boolean => {
+  if (Array.isArray(node)) {
+    return node.some((item) => hasComponentType(item, type));
+  }
+  if (!node || typeof node !== "object") return false;
+  const record = node as Record<string, unknown>;
+  if (record.type === type) return true;
+  return [record.components, record.items, record.accessory].some((child) =>
+    hasComponentType(child, type),
+  );
+};
+
+const inspectLolMockReport = () => {
+  const report = Effect.runSync(buildMockMatchReport("lol"));
+  const sampleEmoji = "<:rank_lol_challenger:1>";
+  const message = matchReportMessage(
+    report,
+    { "lol.challenger": sampleEmoji },
+    gameLogosFrom([
+      { game: "lol", logoUrl: lolLogoUrl },
+      { game: "valorant", logoUrl: valLogoUrl },
+    ]),
+  );
+  const urls = mediaUrlsFrom(message.components);
+  const payload = JSON.stringify(message);
+  const bad = urls.filter(
+    (url) => !/\.(png|jpe?g|webp|gif)(?:\?|$)/i.test(url),
+  );
+  const hasGallery = hasComponentType(message.components, 12);
+  if ((message.flags & 32768) === 0) {
+    return {
+      step: "inspect lol mock payload",
+      ok: false,
+      detail: "missing IS_COMPONENTS_V2",
+    } satisfies StepResult;
+  }
+  if (hasGallery) {
+    return {
+      step: "inspect lol mock payload",
+      ok: false,
+      detail: "match reports must not include a Media Gallery",
+    } satisfies StepResult;
+  }
+  if (bad.length > 0) {
+    return {
+      step: "inspect lol mock payload",
+      ok: false,
+      detail: `non-file image urls: ${bad.join(", ")}`,
+    } satisfies StepResult;
+  }
+  if (!urls.includes(lolLogoUrl)) {
+    return {
+      step: "inspect lol mock payload",
+      ok: false,
+      detail: "header thumbnail must be the game logo",
+    } satisfies StepResult;
+  }
+  if (!payload.includes(sampleEmoji)) {
+    return {
+      step: "inspect lol mock payload",
+      ok: false,
+      detail: "player lines must include rank emojis",
+    } satisfies StepResult;
+  }
+  return {
+    step: "inspect lol mock payload",
+    ok: true,
+    detail: `${urls.length} image urls, game logo thumbnail, rank emojis, no media gallery`,
+    stdout: JSON.stringify({ flags: message.flags, urls, hasGallery }, null, 2),
+  } satisfies StepResult;
+};
+
+const reportMockRefusesNonTesting = () => {
+  const expected =
+    testingDestination ??
+    ({
+      guildId: "1".repeat(18),
+      channelId: "2".repeat(18),
+    } satisfies DiscordDestination);
+  const nonTestingChannelId = "3".repeat(18);
+  const result = run(["admin", "report-mock", "--game", "lol", "--json"], {
+    ...sharedEnv(),
+    DISCORD_BOT_TOKEN: "verify-invalid-token",
+    NOTIFICATION_CHANNEL_ID: nonTestingChannelId,
+    TESTING_NOTIFICATION_CHANNEL_ID: expected.channelId,
+    TESTING_DISCORD_GUILD_ID: expected.guildId,
+  });
+  const text = `${result.stdout}\n${result.stderr}\n${result.detail ?? ""}`;
+  const refusal = testingDiscordRefusal(nonTestingChannelId);
+  const refused = !result.ok && text.includes(refusal);
+  return {
+    step: "report-mock refuses non-testing Discord",
+    ok: refused,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    detail: refused
+      ? refusal
+      : "report-mock did not refuse a non-testing channel",
+  } satisfies StepResult;
+};
+
 const main = () => {
   mkdirSync(artifactDir, { recursive: true });
   if (exists(dbPath)) rmSync(dbPath);
 
   let riotId = "";
   try {
-    riotId = resolveVerifyRiotId(workspace);
+    riotId = resolveVerifyRiotId();
     console.log(`[verify] using riot id ${riotId}`);
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
 
+  record({
+    step: "discord destination",
+    ok: true,
+    detail: testingChannelId
+      ? `riot-tracker-testing channel ${testingChannelId}`
+      : "no allowlisted testing Discord destination; skipping Discord send",
+  });
+
   record(run(["typecheck"]));
   if (!results.at(-1)?.ok) fail("typecheck failed", riotId);
 
-  startBot();
-  const ready = waitForBotReady();
-  record(ready);
-  if (!ready.ok) fail("bot did not become ready", riotId);
+  record(inspectLolMockReport());
+  if (!results.at(-1)?.ok) fail("lol mock payload is not postable", riotId);
+
+  record(reportMockRefusesNonTesting());
+  if (!results.at(-1)?.ok) {
+    fail("report-mock must refuse non-testing Discord", riotId);
+  }
+
+  if (testingChannelId) {
+    startBot();
+    const ready = waitForBotReady();
+    record(ready);
+    if (!ready.ok) fail("bot did not become ready", riotId);
+  } else {
+    record({
+      step: "wait for discord gateway ready",
+      ok: true,
+      detail:
+        "skipped bot boot; no allowlisted riot-tracker-testing destination",
+    });
+  }
 
   const [riotName, riotTag] = riotId.split("#");
   if (!riotName || !riotTag) {
@@ -201,20 +389,50 @@ const main = () => {
 
   record(run(["admin", "status", "--json"]));
 
-  record(run(["admin", "report-mock", "--game", "lol", "--json"]));
-  if (!results.at(-1)?.ok) fail("report-mock failed", riotId);
+  if (!testingChannelId) {
+    record({
+      step: "pnpm admin report-mock --game lol --json",
+      ok: true,
+      detail:
+        "skipped Discord send; set VERIFY_NOTIFICATION_CHANNEL_ID or DISCORD_TEST_CHANNEL_URL to riot-tracker-testing",
+    });
+  } else {
+    const reportMock = run(["admin", "report-mock", "--game", "lol", "--json"]);
+    record(reportMock);
+    if (!reportMock.ok) fail("report-mock failed", riotId);
+    const reportPayload = parseJsonStdout(reportMock.stdout);
+    if (reportPayload.channelId !== testingChannelId) {
+      fail(
+        "report-mock posted somewhere other than riot-tracker-testing",
+        riotId,
+      );
+    }
+    if (
+      typeof reportPayload.flags !== "number" ||
+      (reportPayload.flags & 32768) === 0
+    ) {
+      fail("report-mock was not a Components V2 message", riotId);
+    }
+  }
 
   record(run(["admin", "signout", devDiscordId, "--yes", "--json"]));
 
   record({
     step: "bot log tail",
     ok: true,
-    stdout: captureBotLog(),
+    stdout: testingChannelId ? captureBotLog() : "",
+    detail: testingChannelId ? undefined : "bot was not started",
   });
 
   writeArtifacts(riotId);
   console.log(`[verify] passed; artifacts in ${artifactDir}`);
-  console.log(`[verify] bot left running in tmux session ${botSession}`);
+  if (testingChannelId) {
+    console.log(`[verify] bot left running in tmux session ${botSession}`);
+  } else {
+    console.log(
+      "[verify] Discord send skipped; bot was not started without riot-tracker-testing",
+    );
+  }
 };
 
 function exists(path: string) {

@@ -1,10 +1,14 @@
-# Report mock embed
+# Report mock
 
-Posts a mock match scoreboard embed to the notification channel via Discord REST.
+Posts a mock match scoreboard to the notification channel via Discord REST.
+The payload is a Components V2 message (`IS_COMPONENTS_V2`, flag `1 << 15`),
+not a classic rich embed.
+
+Cloud agents must post this only to the configured testing destination, never production.
 
 ## Sub-features
 
-- `report-mock` — builds mock match data and posts an embed (no live match required)
+- `report-mock` — builds mock match data and posts a Components V2 report (no live match required)
 
 ## How to get to it (user POV)
 
@@ -12,13 +16,26 @@ Posts a mock match scoreboard embed to the notification channel via Discord REST
 
 ## Driving it with admin CLI
 
-Preconditions: `DISCORD_BOT_TOKEN`, `NOTIFICATION_CHANNEL_ID`.
+Preconditions: `DISCORD_BOT_TOKEN`, and a **testing** channel id. For `pnpm verify`
+that is `VERIFY_NOTIFICATION_CHANNEL_ID`, `TESTING_NOTIFICATION_CHANNEL_ID`, or
+the channel from `DISCORD_TEST_CHANNEL_URL`. Ambient `NOTIFICATION_CHANNEL_ID`
+is ignored by verify because it may point at a production destination.
 
 - Action: `pnpm admin report-mock --game lol --json`
-- Observable: exit 0, JSON includes `channelId` and `matchId`; embed appears in the notification channel.
+- Observable: exit 0, JSON includes `channelId`, `matchId`, and `flags` with
+  `IS_COMPONENTS_V2` (`32768`) set. The report appears in the configured
+  testing channel, and `channelId` matches `TESTING_NOTIFICATION_CHANNEL_ID`.
 
 ## Gotchas
 
 - Outbound only — no Discord user session required.
 - Reuses the same mock payloads as `/dev_report`.
-- Cloud agents should not log into Discord web to confirm the embed. REST success plus JSON `channelId` is the proof.
+- Cloud agents should not log into Discord web to confirm the message. REST
+  success plus JSON `channelId` (testing server) and V2 `flags` is the proof.
+- Rank crests in the scoreboard are application emojis (same as `/dev_report`).
+  The header thumbnail is the game logo, not a rank crest, and there is no
+  Media Gallery.
+- Refuses every destination outside `TESTING_DISCORD_GUILD_ID` and
+  `TESTING_NOTIFICATION_CHANNEL_ID`.
+- If testing Discord credentials are missing, `pnpm verify` skips this send
+  instead of posting to production.

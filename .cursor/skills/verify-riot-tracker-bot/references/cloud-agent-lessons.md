@@ -1,50 +1,21 @@
 # Cloud agent lessons
 
-Lessons from running `pnpm verify` on Cursor Cloud against Railway production.
+Lessons from running `pnpm verify` on Cursor Cloud.
 
-## Railway tokens on Cursor Cloud
+## NEVER post verify or mock reports to production
 
-`RAILWAY_API_TOKEN` is often a project or workspace UUID, not a personal account token.
+This already happened: a verify / `report-mock` run inherited an ambient production `NOTIFICATION_CHANNEL_ID` and posted a Components V2 mock there. That is unacceptable.
 
-- `railway whoami`, `railway list`, and `railway link` return `Unauthorized` (`me` is not allowed). That is not a dead end.
-- GraphQL `projects` and `railway ssh` still work once project, service, and environment are named.
+Rules:
 
-Discover IDs:
-
-```bash
-pnpm exec railway api 'query { projects { edges { node { id name } } } }'
-```
-
-Production in this repo has been:
-
-- project name `riot-tracker-bot`
-- service name `riot-tracker-bot`
-- environment name `production`
-
-Export before ssh (names or ids):
-
-```bash
-export RAILWAY_PROJECT_ID=<project-id>
-export RAILWAY_SERVICE=riot-tracker-bot
-export RAILWAY_ENVIRONMENT=production
-```
-
-The CLI reads `RAILWAY_API_TOKEN`. Cursor Cloud may inject `RAILWAY_API_KEY` or `RAILWAY_TOKEN`; `src/verify/production-riot-id.ts` copies those onto `RAILWAY_API_TOKEN`.
-
-## SSH
-
-`railway ssh` needs a key Railway knows and a host key in `known_hosts`:
-
-```bash
-ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
-pnpm exec railway ssh keys add -k ~/.ssh/id_ed25519.pub -n cursor-cloud-verify
-ssh-keyscan -t ed25519 ssh.railway.com >> ~/.ssh/known_hosts
-pnpm exec railway ssh --service riot-tracker-bot -- pnpm admin status --json
-```
-
-Banners go to stderr. JSON is on stdout; slice from the first `{`.
-
-Do not set `VERIFY_RIOT_ID` when ssh works. The harness picks the first production account that already has tracked games.
+- Run the bot locally in the cloud VM (`pnpm start` / `pnpm verify`).
+- Connect that local bot only to the explicitly configured testing destination.
+- Never inherit a production `NOTIFICATION_CHANNEL_ID` for verify or mock reports.
+- Isolated sqlite is not enough. Discord destination must be isolated too.
+- `RAILWAY_API_TOKEN_DEV` is allowed: a Railway project token scoped to the `dev` environment, used read-only. Export it as `RAILWAY_TOKEN` only while running Railway CLI and keep `RAILWAY_API_TOKEN` unset. Production Railway tokens, environments, databases, deploys, and mutations remain forbidden. Never give the cloud environment a production Railway token or production database.
+- `pnpm verify` ignores ambient `NOTIFICATION_CHANNEL_ID`. Configure `TESTING_DISCORD_GUILD_ID` plus `TESTING_NOTIFICATION_CHANNEL_ID`, or `DISCORD_TEST_CHANNEL_URL`.
+- If testing values are missing or conflict, skip Discord send. Do not fall back. `report-mock` and `DEV_MODE` allow only the configured testing guild and channel.
+- Supply a designated test account through `VERIFY_RIOT_ID`; never resolve one from production.
 
 ## Bot boot race
 
